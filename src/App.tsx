@@ -91,6 +91,21 @@ export function App() {
     return "Camera off";
   }, [status]);
 
+  function stopRecordingTracks() {
+    if (animationFrameRef.current !== null) {
+      window.cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.srcObject = null;
+    }
+  }
+
   useEffect(() => {
     formRef.current = form;
   }, [form]);
@@ -352,21 +367,6 @@ export function App() {
     setHandCount(0);
     setElapsedMs(0);
     drawIdleCanvas();
-  }
-
-  function stopRecordingTracks() {
-    if (animationFrameRef.current !== null) {
-      window.cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
-
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-
-    if (videoRef.current) {
-      videoRef.current.pause();
-      videoRef.current.srcObject = null;
-    }
   }
 
   function drawIdleCanvas() {

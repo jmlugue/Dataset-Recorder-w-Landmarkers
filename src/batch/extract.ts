@@ -70,7 +70,7 @@ async function resolveDuration(video: HTMLVideoElement): Promise<number> {
   return 0;
 }
 
-async function seekTo(video: HTMLVideoElement, time: number): Promise<void> {
+export async function seekTo(video: HTMLVideoElement, time: number): Promise<void> {
   if (Math.abs(video.currentTime - time) < 1e-4) return;
   video.currentTime = time;
   await waitForVideoEvent(video, "seeked", 8000);

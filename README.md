@@ -99,8 +99,9 @@ Exports (available once clips are extracted):
   `dataset.npz` cell directly, skipping extraction.
 - **Table 3 CSV** — the manuscript's long format:
   `Recording ID, Gesture Label, Frame No., Hand Type, Landmark No., X, Y, Z`.
-- **Overlay videos ZIP** — each clip re-encoded with the landmark skeleton drawn on it
-  (real-time per clip, so slower for large batches).
+- **Overlay videos ZIP** — each clip re-encoded (via WebCodecs) with the landmark skeleton
+  drawn on it, at the original duration. Slower for large batches, and needs a recent
+  Chrome/Edge (WebCodecs `VideoEncoder`).
 
 The approved gesture labels are `toilet, eat, drink, help, yes, no, sit`.
 

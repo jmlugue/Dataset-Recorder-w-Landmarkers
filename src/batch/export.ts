@@ -1,12 +1,11 @@
 import { strToU8, zip } from "fflate";
-import type { DrawingUtils } from "@mediapipe/tasks-vision";
-import type { HandLandmarker } from "@mediapipe/tasks-vision";
+import { ArrayBufferTarget, Muxer } from "webm-muxer";
+import type { DrawingUtils, NormalizedLandmark } from "@mediapipe/tasks-vision";
 import { downloadBlob } from "../file-utils";
 import { drawHandLandmarks, drawVideoFrame, type HandConnection } from "../draw";
 import { loadVision } from "../landmarker";
-import { getBestSupportedMimeType } from "../media";
 import type { NotebookClipRecord, UploadedClip } from "../types";
-import { clipNameFromFilename, waitForVideoEvent, type MonotonicClock } from "./extract";
+import { clipNameFromFilename, seekTo, waitForVideoEvent } from "./extract";
 import { table4Label } from "./qc";
 
 const OVERLAY_FPS = 30;
@@ -140,14 +139,30 @@ export async function buildColabZipBlob(clips: UploadedClip[]): Promise<Blob> {
   return new Blob([zipped as BlobPart], { type: "application/zip" });
 }
 
+async function waitForEncoderDrain(encoder: VideoEncoder, max = 6): Promise<void> {
+  while (encoder.encodeQueueSize > max) {
+    await new Promise((resolve) => window.setTimeout(resolve, 8));
+  }
+}
+
+// Re-encode one clip with its landmark skeleton burned on. Frames are read by seeking (the
+// path proven during extraction) and encoded with WebCodecs, which stamps each frame with an
+// explicit presentation timestamp — so the output duration matches the source regardless of
+// how long processing takes. We reuse the landmarks already extracted (no re-detection).
 async function renderOverlayWebm(
-  file: File,
-  landmarker: HandLandmarker,
-  clock: MonotonicClock
+  clip: UploadedClip,
+  onProgress?: (fraction: number) => void
 ): Promise<Blob> {
+  if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") {
+    throw new Error("Overlay export needs WebCodecs — use a recent Chrome or Edge.");
+  }
+
+  const extraction = clip.extraction!;
+  const frames = extraction.frames;
   const vision = await loadVision();
   const connections = vision.HandLandmarker.HAND_CONNECTIONS as HandConnection[];
-  const url = URL.createObjectURL(file);
+
+  const url = URL.createObjectURL(clip.file);
   const video = document.createElement("video");
   video.muted = true;
   video.playsInline = true;
@@ -156,8 +171,8 @@ async function renderOverlayWebm(
 
   try {
     await waitForVideoEvent(video, "loadedmetadata", 15000);
-    const width = video.videoWidth || 640;
-    const height = video.videoHeight || 480;
+    const width = video.videoWidth || extraction.width || 640;
+    const height = video.videoHeight || extraction.height || 480;
 
     const canvas = document.createElement("canvas");
     canvas.width = width;
@@ -166,49 +181,51 @@ async function renderOverlayWebm(
     if (!context) throw new Error("Could not create an overlay canvas.");
     const drawingUtils: DrawingUtils = new vision.DrawingUtils(context);
 
-    const stream = canvas.captureStream(OVERLAY_FPS);
-    const mimeType = getBestSupportedMimeType();
-    const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-    const chunks: Blob[] = [];
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) chunks.push(event.data);
-    };
-    const stopped = new Promise<void>((resolve) => {
-      recorder.onstop = () => resolve();
-    });
+    const fps = extraction.fps || OVERLAY_FPS;
+    const frameDurationUs = Math.round(1_000_000 / fps);
+    const keyFrameInterval = Math.max(1, Math.round(fps));
 
-    recorder.start();
-    await new Promise<void>((resolve) => {
-      let raf = 0;
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        window.cancelAnimationFrame(raf);
-        window.clearTimeout(safety);
-        resolve();
-      };
-      const safety = window.setTimeout(finish, 180000);
-      const step = () => {
-        if (video.ended || video.paused) {
-          finish();
-          return;
-        }
-        drawVideoFrame(context, video, width, height, false);
-        clock.value += Math.max(1, Math.round(1000 / OVERLAY_FPS));
-        const result = landmarker.detectForVideo(video, clock.value);
-        drawHandLandmarks(drawingUtils, result.landmarks ?? [], connections, width);
-        raf = window.requestAnimationFrame(step);
-      };
-      video.onended = finish;
-      video.play().then(() => {
-        raf = window.requestAnimationFrame(step);
-      }).catch(finish);
+    const muxer = new Muxer({
+      target: new ArrayBufferTarget(),
+      video: { codec: "V_VP9", width, height, frameRate: fps }
     });
+    let encoderError: unknown = null;
+    const encoder = new VideoEncoder({
+      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      error: (error) => {
+        encoderError = error;
+        console.error("Overlay VideoEncoder error", error);
+      }
+    });
+    encoder.configure({ codec: "vp09.00.10.08", width, height, bitrate: 4_000_000, framerate: fps });
 
-    recorder.stop();
-    await stopped;
-    return new Blob(chunks, { type: mimeType || "video/webm" });
+    for (let i = 0; i < frames.length; i += 1) {
+      if (encoderError) throw encoderError;
+      const frame = frames[i];
+      await seekTo(video, Math.max(0, frame.timestampMs / 1000));
+      drawVideoFrame(context, video, width, height, false);
+      drawHandLandmarks(
+        drawingUtils,
+        frame.hands as unknown as NormalizedLandmark[][],
+        connections,
+        width
+      );
+      const videoFrame = new VideoFrame(canvas, {
+        timestamp: i * frameDurationUs,
+        duration: frameDurationUs
+      });
+      encoder.encode(videoFrame, { keyFrame: i % keyFrameInterval === 0 });
+      videoFrame.close();
+      await waitForEncoderDrain(encoder);
+      onProgress?.((i + 1) / frames.length);
+    }
+
+    await encoder.flush();
+    encoder.close();
+    if (encoderError) throw encoderError;
+    muxer.finalize();
+    const { buffer } = muxer.target as ArrayBufferTarget;
+    return new Blob([buffer], { type: "video/webm" });
   } finally {
     video.pause();
     video.removeAttribute("src");
@@ -219,20 +236,19 @@ async function renderOverlayWebm(
 
 export async function buildOverlayZipBlob(
   clips: UploadedClip[],
-  landmarker: HandLandmarker,
-  clock: MonotonicClock,
   onProgress?: (progress: number) => void
 ): Promise<Blob> {
   const files: Record<string, Uint8Array> = {};
   const used = new Set<string>();
   const targets = readyClips(clips);
-  let done = 0;
-  for (const clip of targets) {
-    const webm = await renderOverlayWebm(clip.file, landmarker, clock);
+  for (let index = 0; index < targets.length; index += 1) {
+    const clip = targets[index];
+    const webm = await renderOverlayWebm(clip, (fraction) =>
+      onProgress?.((index + fraction) / targets.length)
+    );
     const path = uniquePath(used, `${clip.label}/${clipNameFromFilename(clip.fileName)}_overlay.webm`);
     files[path] = new Uint8Array(await webm.arrayBuffer());
-    done += 1;
-    onProgress?.(done / targets.length);
+    onProgress?.((index + 1) / targets.length);
   }
   // webm is already compressed; store without extra deflate.
   const zipped = await new Promise<Uint8Array>((resolve, reject) => {
@@ -253,10 +269,8 @@ export function downloadTable3Csv(clips: UploadedClip[]): void {
 
 export async function downloadOverlayZip(
   clips: UploadedClip[],
-  landmarker: HandLandmarker,
-  clock: MonotonicClock,
   onProgress?: (progress: number) => void
 ): Promise<void> {
-  const blob = await buildOverlayZipBlob(clips, landmarker, clock, onProgress);
+  const blob = await buildOverlayZipBlob(clips, onProgress);
   downloadBlob(blob, "overlay_videos.zip");
 }

@@ -196,8 +196,7 @@ export function BatchPanel({ onNotify }: { onNotify?: Notify }) {
         downloadTable3Csv(clips);
         onNotify?.("good", "Table 3 CSV downloaded.");
       } else {
-        const landmarker = await ensureLandmarker();
-        await downloadOverlayZip(clips, landmarker, clockRef.current, setExportProgress);
+        await downloadOverlayZip(clips, setExportProgress);
         onNotify?.("good", "Overlay videos ZIP downloaded.");
       }
     } catch (error) {

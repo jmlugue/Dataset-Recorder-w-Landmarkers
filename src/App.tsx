@@ -16,23 +16,24 @@ import {
   Video
 } from "lucide-react";
 import { createFileBaseName, createRecordingId, downloadBlob, downloadMetadata } from "./file-utils";
-import { demoGestureLabels } from "./labels";
+import { gestureLabels } from "./labels";
 import { getBestSupportedMimeType, getCameraStream, isSecureCameraContext } from "./media";
+import { createHandLandmarker, loadVision, toSerializableHand } from "./landmarker";
+import { drawHandLandmarks, drawVideoFrame, roundRect, type HandConnection } from "./draw";
+import { BatchPanel } from "./batch/BatchPanel";
 import type {
   CameraView,
   CompletedRecording,
   HandFrameSample,
-  HandLandmarkPoint,
   RecorderForm,
   RecordingMetadata,
   RecordingStatus
 } from "./types";
 
-type HandConnection = { start: number; end: number };
 type Toast = { tone: "good" | "warn" | "info"; message: string };
 
 const initialForm: RecorderForm = {
-  label: "Hello",
+  label: "eat",
   participantId: "P01",
   takeNumber: "1",
   cameraView: "front",
@@ -50,9 +51,6 @@ const cameraViews: Array<{ value: CameraView; label: string }> = [
   { value: "close-up", label: "Close-up" },
   { value: "custom", label: "Custom" }
 ];
-
-const trackerModelPath = "/models/hand_landmarker.task";
-const wasmPath = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
 
 export function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -81,7 +79,12 @@ export function App() {
   const [cameraSize, setCameraSize] = useState({ width: 1280, height: 720 });
 
   const canUseCamera = isSecureCameraContext();
-  const canRecord = status === "camera-ready" && form.label.trim() && form.participantId.trim();
+  // Allow re-recording after a take: once a clip is saved the status is "recorded" but the
+  // camera and tracking loop are still live, so the button must stay enabled.
+  const canRecord =
+    (status === "camera-ready" || status === "recorded") &&
+    Boolean(form.label.trim()) &&
+    Boolean(form.participantId.trim());
   const latestRecording = recordings[0];
   const recordingStateLabel = useMemo(() => {
     if (status === "recording") return "Recording";
@@ -136,17 +139,8 @@ export function App() {
     if (handLandmarkerRef.current && drawingUtilsRef.current) return handLandmarkerRef.current;
 
     setTrackerStatus("loading");
-    const vision = await import("@mediapipe/tasks-vision");
-    const fileset = await vision.FilesetResolver.forVisionTasks(wasmPath);
-
-    const handLandmarker = await vision.HandLandmarker.createFromOptions(fileset, {
-      baseOptions: { modelAssetPath: trackerModelPath },
-      runningMode: "VIDEO",
-      numHands: 2,
-      minHandDetectionConfidence: 0.5,
-      minHandPresenceConfidence: 0.5,
-      minTrackingConfidence: 0.5
-    });
+    const vision = await loadVision();
+    const handLandmarker = await createHandLandmarker();
 
     const canvasContext = canvasRef.current?.getContext("2d");
     if (!canvasContext) throw new Error("The recording canvas is unavailable.");
@@ -216,18 +210,7 @@ export function App() {
         const landmarks = formRef.current.mirrorPreview ? mirrorHands(result.landmarks) : result.landmarks;
 
         if (showLandmarksRef.current) {
-          landmarks.forEach((hand) => {
-            drawingUtils.drawConnectors(hand, handConnectionsRef.current, {
-              color: "#14b8a6",
-              lineWidth: Math.max(3, width * 0.004)
-            });
-            drawingUtils.drawLandmarks(hand, {
-              color: "#ffffff",
-              fillColor: "#2563eb",
-              lineWidth: 2,
-              radius: Math.max(3, width * 0.004)
-            });
-          });
+          drawHandLandmarks(drawingUtils, landmarks, handConnectionsRef.current, width);
         }
 
         drawRecordingOverlay(context, width, height, result.landmarks.length);
@@ -498,7 +481,7 @@ export function App() {
               placeholder="Example: Hello"
             />
             <datalist id="gesture-labels">
-              {demoGestureLabels.map((label) => (
+              {gestureLabels.map((label) => (
                 <option key={label} value={label} />
               ))}
             </datalist>
@@ -628,6 +611,8 @@ export function App() {
         )}
       </section>
 
+      <BatchPanel onNotify={showToast} />
+
       <section className="phone-note">
         <ShieldCheck size={22} />
         <div>
@@ -649,22 +634,6 @@ export function App() {
   );
 }
 
-function drawVideoFrame(
-  context: CanvasRenderingContext2D,
-  video: HTMLVideoElement,
-  width: number,
-  height: number,
-  mirrored: boolean
-) {
-  context.save();
-  if (mirrored) {
-    context.translate(width, 0);
-    context.scale(-1, 1);
-  }
-  context.drawImage(video, 0, 0, width, height);
-  context.restore();
-}
-
 function drawRecordingOverlay(context: CanvasRenderingContext2D, width: number, height: number, handCount: number) {
   context.save();
   context.fillStyle = "rgba(8, 31, 45, 0.58)";
@@ -679,23 +648,6 @@ function drawRecordingOverlay(context: CanvasRenderingContext2D, width: number, 
   context.restore();
 }
 
-function roundRect(
-  context: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  radius: number
-) {
-  context.beginPath();
-  context.moveTo(x + radius, y);
-  context.arcTo(x + width, y, x + width, y + height, radius);
-  context.arcTo(x + width, y + height, x, y + height, radius);
-  context.arcTo(x, y + height, x, y, radius);
-  context.arcTo(x, y, x + width, y, radius);
-  context.closePath();
-}
-
 function mirrorHands(hands: NormalizedLandmark[][]) {
   return hands.map((hand) =>
     hand.map((point) => ({
@@ -703,14 +655,6 @@ function mirrorHands(hands: NormalizedLandmark[][]) {
       x: 1 - point.x
     }))
   );
-}
-
-function toSerializableHand(hand: NormalizedLandmark[]): HandLandmarkPoint[] {
-  return hand.map((point) => ({
-    x: Number(point.x.toFixed(5)),
-    y: Number(point.y.toFixed(5)),
-    z: Number(point.z.toFixed(5))
-  }));
 }
 
 function formatTime(milliseconds: number) {

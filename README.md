@@ -83,9 +83,10 @@ Workflow:
 1. **Add file(s)** or **Add folder** (or drag clips onto the drop zone). The filename prefix
    becomes the label, e.g. `eat_001.mov` → `eat`. You can edit the label and the expected hand
    count (auto / 1 / 2) per clip.
-2. **Extract landmarks** runs MediaPipe frame-by-frame (at 0.3 confidence, matching the Colab
-   notebook). Clips with a real duration are stepped by seeking; no-duration webm (including this
-   app's own recordings) falls back to playback sampling.
+2. **Extract landmarks** runs MediaPipe frame-by-frame at 0.6 confidence (stricter than the
+   Colab notebook's 0.3, so detection rates read lower here than in the notebook). Clips with a
+   real duration are stepped by seeking; no-duration webm (including this app's own recordings)
+   falls back to playback sampling.
 3. Each clip shows a **detection rate** and two "good for modeling" verdicts:
    - **Table 4 verdict** (manuscript, strict): ≥95% Accept · 90–94% Accept if complete ·
      80–89% Review · <80% Re-record.

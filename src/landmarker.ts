@@ -6,10 +6,11 @@ import type { HandLandmarkPoint } from "./types";
 export const trackerModelPath = "/models/hand_landmarker.task";
 export const wasmPath = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm";
 
-// The live recorder runs at 0.5 (cleaner, matches the MakaLearn prototype). The batch
-// extractor defaults to 0.3 to mirror the Colab notebook so coverage numbers line up.
+// The live recorder runs at 0.5 (matches the MakaLearn prototype). The batch extractor runs
+// at 0.6 for stricter, cleaner landmark detections — note this is above the Colab notebook's
+// 0.3, so coverage/detection-rate numbers will read lower here than in the notebook.
 export const LIVE_CONFIDENCE = 0.5;
-export const BATCH_CONFIDENCE = 0.3;
+export const BATCH_CONFIDENCE = 0.6;
 
 let visionModulePromise: Promise<typeof import("@mediapipe/tasks-vision")> | null = null;
 
